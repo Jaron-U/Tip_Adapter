@@ -1,14 +1,27 @@
 import os
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from torchvision import transforms
+
+classnames = ["doughnut", "glass cup", "lemon", "chinese noodle", "chinese flute"]
+template = ["a photo of {}"]
+label2name = {
+            0: "doughnut",
+            1: "glass_cup",
+            2: "lemon",
+            3: "chinese_noodle",
+            4: "chinese_flute",
+            5: "others"
+        }
 
 class CustomDataset(Dataset):
     def __init__(self, root_dir, transform=None, shot_num=None):
         self.rood_dir = root_dir
         self.transform = transform
         self.shot_num = shot_num
-        self.class_name = ["doughnut", "glass cup", "lemon", "chinese noodle", "chinese flute"]
+        self.classnames = classnames
+        self.template = template
+        self.label2name = classnames
         self.image_paths = []
         self.labels = []
 
@@ -36,32 +49,20 @@ class CustomDataset(Dataset):
         
         return image, label
 
-if __name__ == "__main__":
-    data_dir = "/home/jianglongyu/mydrive/clip_dataset/train_dataset"
+def getDataset(data_dir, preprocess, shot_num=None):
     train_dir = os.path.join(data_dir, "train")
     test_dir = os.path.join(data_dir, "test")
 
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.RandomResizedCrop(size=224, scale=(0.5, 1), 
+                                     interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.RandomHorizontalFlip(p=0.5),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
+        transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073), 
+                             std=(0.26862954, 0.26130258, 0.27577711))
+        ])
 
-    def create_dataloaders(train_dir, test_dir, transform, shot_number=None, batch_size=32):
-        train_dataset = CustomDataset(root_dir=train_dir, transform=transform, shot_num=shot_number)
-        test_dataset = CustomDataset(root_dir=test_dir, transform=transform)
+    train_dataset = CustomDataset(root_dir=train_dir, transform=transform, shot_num=shot_num)
+    test_dataset = CustomDataset(root_dir=test_dir, transform=preprocess)
 
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
-
-        return train_loader, test_loader
-
-    shot_number = 5
-    batch_size = 25
-    train_loader, test_loader = create_dataloaders(train_dir, test_dir, transform, shot_number, batch_size)
-
-    for batch_idx, (images, labels) in enumerate(train_loader):
-        print(f"Batch {batch_idx}:")
-        print(f"  Images shape: {images.shape}")
-        print(f"  Labels: {labels}")
-        break
+    return train_dataset, test_dataset
