@@ -1,17 +1,18 @@
-import numpy as np
 import os.path as osp
 from collections import OrderedDict
 import pandas as pd
 
 class Evaluator:
-    def __init__(self, cfg, label2name):
+    def __init__(self, cfg, label2name, tip_adapter=False):
         self.label2name = label2name
         self.label_length = len(label2name)
         self.correct = 0
         self.total = 0
         self.y_true = []
         self.y_pred = []
-        self.thresholds = cfg['THRESHOLDS']
+        self.thresholds = cfg['thresholds']
+        if tip_adapter:
+            self.thresholds = cfg['tip_thresholds']
         self.cfg = cfg
         
         self.results = {
@@ -31,13 +32,13 @@ class Evaluator:
         self.results = {
             label: {"TP": 0, "FP": 0, "FN": 0, "TN": 0} for label in range(self.label_length)
         }
-        self._results_by_threshold = {
+        self.results_by_threshold = {
             label: [
                 {"TP": 0, "FP": 0, "FN": 0, "TN": 0} for _ in range(len(self.thresholds[label]))
             ] for label in range(self.label_length)
         }
     
-    def precess(self, output, gt):
+    def process(self, output, gt):
         output, gt = output.cpu().numpy(), gt.cpu().numpy()
         for i in range(len(output)):
             true_label = gt[i]
@@ -56,7 +57,7 @@ class Evaluator:
                         else:
                             self.results_by_threshold[label][t_idx]['TN'] += 1
     
-    def evaluate(self, adapter_name="tip_adapter", is_searching=True):
+    def evaluate(self, adapter_name="tip_adapter", is_searching=False):
         results = OrderedDict()
         all_thresholds_results = []
         best_thresholds = [{"F1": 0, "Threshold": 0, "Precision": 0, "Recall": 0} for _ in range(self.label_length)]
@@ -103,7 +104,7 @@ class Evaluator:
             for label in range(self.label_length)
         ]   
         
-        if is_searching:
+        if not is_searching:
             all_results_df = pd.DataFrame(all_thresholds_results)
             all_results_csv_path = osp.join(self.cfg['OUTPUT_DIR'], f"all_evaluate_{adapter_name}.csv")
             all_results_df.to_csv(all_results_csv_path, index=False)
