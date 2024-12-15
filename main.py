@@ -2,6 +2,8 @@ import os
 import random
 import yaml
 from tqdm import tqdm
+from logger import setup_logger
+import json
 
 import torch
 import torch.nn.functional as F
@@ -30,7 +32,7 @@ def search_hp(cfg, cache_keys, cache_values, features, labels, clip_weights, ft_
                 clip_logits = 100. * features @ clip_weights
                 tip_logits = clip_logits + cache_logits * alpha
                 ft_evaluator.reset()
-                ft_evaluator.process(tip_logits.detach(), labels.detach())
+                ft_evaluator.process(tip_logits, labels)
                 result = ft_evaluator.evaluate("tip_adapter", is_searching=True)
 
                 if best_f1 < result['average_f1']:
@@ -121,9 +123,9 @@ def run_tip_adapter(cfg, cache_keys, cache_values, test_features, test_labels,
     clip_logits = 100. * test_features @ clip_weights
     evaluator.reset()
     evaluator.process(clip_logits, test_labels)
-    result = evaluator.evaluate("clip_adapter", is_searching=False)
-    print(f"\n**** Zero-shot CLIP Average | Precision: {result['average_precision']:.3f} |"
-          f"Recall: {result['average_recall']:.3f} | F1: {result['average_f1']:.3f}")
+    result = evaluator.evaluate("clip", is_searching=False)
+    print(f"\n**** Zero-shot CLIP Average | Precision: {result['average_precision']:.4f} |"
+          f"Recall: {result['average_recall']:.4f} | F1: {result['average_f1']:.4f}")
 
     # Tip_adapter
     beta, alpha = cfg['init_beta'], cfg['init_alpha']
@@ -132,9 +134,10 @@ def run_tip_adapter(cfg, cache_keys, cache_values, test_features, test_labels,
     tip_logits = clip_logits + cache_logits * alpha
     ft_evaluator.reset()
     ft_evaluator.process(tip_logits, test_labels)
-    ft_result = ft_evaluator.evaluate("tip_adapter", is_searching=False)
-    print(f"\n**** Tip-Adapter Average | Precision: {ft_result['average_precision']:.3f} |" 
-          f"Recall: {ft_result['average_recall']:.3f} | F1: {ft_result['average_f1']:.3f}")
+    ft_result = ft_evaluator.evaluate("tip_adapter", is_searching=True)
+    ft_evaluator.savefiles("tip_adapter", shot_num=cfg['shots'])
+    print(f"\n**** Tip-Adapter Average | Precision: {ft_result['average_precision']:.4f} |" 
+          f"Recall: {ft_result['average_recall']:.4f} | F1: {ft_result['average_f1']:.4f}\n")
     
     # Search Hyperparameters
     # _ = search_hp(cfg, cache_keys, cache_values, test_features, test_labels, clip_weights, ft_evaluator)
@@ -154,7 +157,6 @@ def run_tip_adapter_F(cfg, cache_keys, cache_values, test_features, test_labels,
     for epoch in range(cfg['train_epoch']):
         adapter.train()
         loss_list = []
-        f1_list = []
         
         for i, (images, target) in enumerate(tqdm(train_loader_F, desc=f"epoch {epoch} / {cfg['train_epoch']}")):
             images, target = images.cuda(), target.cuda()
@@ -171,48 +173,52 @@ def run_tip_adapter_F(cfg, cache_keys, cache_values, test_features, test_labels,
             loss_list.append(loss)
 
             ft_evaluator.reset()
-            ft_evaluator.process(tip_logits.detach(), target.detach())
+            ft_evaluator.process(tip_logits, target)
             result = ft_evaluator.evaluate("ft_tip_adapter", is_searching=True)
-            f1_list.append(result["average_f1"])
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             scheduler.step()
 
-        tqdm.write(f"LR: {scheduler.get_last_lr()[0]:.6f}, average f1: {sum(f1_list)/len(f1_list):.3f}, "
-                   f"average Loss: {sum(loss_list)/len(loss_list):.3f}")
+        tqdm.write(f"LR: {scheduler.get_last_lr()[0]:.6f}, "
+                   f"average traing Loss: {sum(loss_list)/len(loss_list):.3f}")
     
         adapter.eval()
 
         affinity = adapter(test_features)
-        cache_logits = ((-1) * (0.83 - beta * affinity)).exp() @ cache_values
+        cache_logits = ((-1) * (beta - beta * affinity)).exp() @ cache_values
         clip_logits = 100. * test_features @ clip_weights
         tip_logits = clip_logits + cache_logits * alpha
 
         ft_evaluator.reset()
-        ft_evaluator.process(tip_logits.detach(), test_labels.detach())
-        result = ft_evaluator.evaluate("ft_tip_adapter", is_searching=True)
+        ft_evaluator.process(tip_logits, test_labels)
+        result = ft_evaluator.evaluate("TA_trained", is_searching=True)
+        print("trained", result['average_f1'])
         
         if best_f1 < result['average_f1']:
             best_epoch = epoch
             best_f1 = result['average_f1']
+            ft_evaluator.savefiles("TA_trained", shot_num=cfg['shots'])
+            tqdm.write(f"new best test f1: {best_f1}")
             torch.save(adapter.weight, cfg['cache_dir'] + "/best_F_" + str(cfg['shots']) + "shots.pt")
     
     adapter.weight = torch.load(cfg['cache_dir'] + "/best_F_" + str(cfg['shots']) + "shots.pt", weights_only=True)
-    print(f"**** After fine-tuning, Tip-Adapter-F's best test accuracy: {best_f1:.2f}, at epoch: {best_epoch}. ****\n")
+    print(f"**** After fine-tuning, Tip-Adapter-F's best test f1: {best_f1:.4f}, at epoch: {best_epoch}. ****\n")
 
     # Search Hyperparameters
-    _ = search_hp(cfg, affinity, cache_values, test_features, test_labels, clip_weights, ft_evaluator, adapter=adapter)
+    # _ = search_hp(cfg, affinity, cache_values, test_features, test_labels, clip_weights, ft_evaluator, adapter=adapter)
 
 
 def main():
     cfg = yaml.load(open("custom_dataset.yaml", 'r'), Loader=yaml.Loader)
-
     cache_dir = os.path.join('cache', cfg['dataset'])
     os.makedirs(cache_dir, exist_ok=True)
     os.makedirs(cfg['OUTPUT_DIR'], exist_ok=True)
     cfg['cache_dir'] = cache_dir
+
+    setup_logger(cfg['shots'], cfg['OUTPUT_DIR'])
+    print(json.dumps(cfg, indent=4, ensure_ascii=False))
 
     clip_model, preprocess = clip.load(cfg['backbone'])
     clip_model.eval()
